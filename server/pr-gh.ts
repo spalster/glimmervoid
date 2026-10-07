@@ -36,6 +36,7 @@ interface GithubIssueRow {
   title?: unknown;
   body?: unknown;
   labels?: unknown;
+  assignees?: unknown;
   url?: unknown;
   updatedAt?: unknown;
 }
@@ -55,6 +56,8 @@ interface GithubIssue {
 }
 
 type GithubIssueWithoutBody = Omit<GithubIssue, 'body'>;
+
+type GithubListedIssue = GithubIssueWithoutBody & { assignees: string[] };
 
 interface PrSearchResult {
   items: SearchedPrType[];
@@ -79,7 +82,7 @@ type PrHeadReference = PrReference & { headSha: string };
 
 interface GithubIssueList {
   ok: boolean;
-  issues: GithubIssueWithoutBody[];
+  issues: GithubListedIssue[];
   error: string;
 }
 
@@ -164,6 +167,8 @@ function parseJson<T>(text: string, fallback: T): T {
 }
 
 const HEX_LABEL_COLOR = /^[0-9a-f]{6}$/i;
+const GITHUB_ISSUE_LIST_LIMIT = 200;
+const GITHUB_ASSIGNEE_LOGIN = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
 const GH_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const MERGED_SINCE_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const MY_PR_FIELDS_FRAGMENT = `fragment myPrFields on PullRequest {
@@ -372,6 +377,21 @@ function normalizeIssue(row: GithubIssueRow): GithubIssue | null {
     url: typeof row.url === 'string' ? row.url : '',
     updatedAt: typeof row.updatedAt === 'string' ? row.updatedAt : '',
   };
+}
+
+function normalizeIssueAssignees(candidate: unknown): string[] {
+  if (!Array.isArray(candidate)) return [];
+  const logins = candidate.map((assignee: unknown) => {
+    if (!assignee || typeof assignee !== 'object' || !('login' in assignee)) return '';
+    return typeof assignee.login === 'string' ? assignee.login.trim() : '';
+  });
+  return [...new Set(logins.filter((login) => GITHUB_ASSIGNEE_LOGIN.test(login)))];
+}
+
+function listedIssue(row: GithubIssueRow): GithubListedIssue[] {
+  const issue = normalizeIssue(row);
+  if (!issue) return [];
+  return [{ ...issueWithoutBody(issue), assignees: normalizeIssueAssignees(row.assignees) }];
 }
 
 function issueWithoutBody(issue: GithubIssue): GithubIssueWithoutBody {
@@ -690,12 +710,10 @@ function createPrGh(cwd: string, commandRunner: typeof run = run): PrGh {
     },
 
     async listIssues() {
-      const r = await commandRunner('gh', ['issue', 'list', '--state', 'open', '-L', '50', '--search', 'sort:updated-desc', '--json', 'number,title,labels,url,updatedAt'], cwd);
+      const r = await commandRunner('gh', ['issue', 'list', '--state', 'open', '-L', String(GITHUB_ISSUE_LIST_LIMIT), '--search', 'sort:updated-desc', '--json', 'number,title,labels,assignees,url,updatedAt'], cwd);
       if (!r.ok) return { ok: false, issues: [], error: r.err.trim() || 'gh issue list failed' };
       const rows = parseJson<GithubIssueRow[]>(r.out, []);
-      const issues = Array.isArray(rows)
-        ? rows.map(normalizeIssue).filter((issue): issue is GithubIssue => issue !== null).map(issueWithoutBody)
-        : [];
+      const issues = Array.isArray(rows) ? rows.flatMap(listedIssue) : [];
       return { ok: true, issues, error: '' };
     },
 
